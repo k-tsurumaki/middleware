@@ -11,19 +11,65 @@ import (
 	"os"
 )
 
+type CertManager interface {
+	LoadRootCert() (*x509.CertPool, error)
+	VerifyCert(certPEM string) (*x509.Certificate, error)
+}
+
+type FileCertManager struct {
+	rootCertPath string
+}
+
+func (f *FileCertManager) LoadRootCert() (*x509.CertPool, error) {
+	// ローカルからルート証明書を読み込み
+	rootCertPEM, err := os.ReadFile(f.rootCertPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// ルート証明書をCertPoolに追加
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(rootCertPEM) {
+		return nil, fmt.Errorf("failed to add root certificate to CertPool")
+	}
+
+	return roots, nil
+}
+
+func (f *FileCertManager) VerifyCert(certPEM string) (*x509.Certificate, error) {
+	decodedCertHeader, err := base64.StdEncoding.DecodeString(certPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode certificate")
+	}
+
+	certBlock, _ := pem.Decode(decodedCertHeader)
+	if certBlock == nil {
+		return nil, fmt.Errorf("failed to decode certificate")
+	}
+
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse certificate")
+	}
+
+	return cert, nil
+}
+
 func main() {
+	certManager := &FileCertManager{rootCertPath: "pki/rootCA.crt"}
+
 	go func() {
 		http.HandleFunc("/upstream/", upstreamHandler)
 		log.Println("Upstream server is running on port 8081")
 		log.Fatal(http.ListenAndServe(":8081", nil))
 	}()
 
-	http.Handle("/", clientCertMiddleware(http.HandlerFunc(proxyhandler)))
+	http.Handle("/", clientCertMiddleware(http.HandlerFunc(proxyhandler), certManager))
 	log.Println("Server is running on port 8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func clientCertMiddleware(next http.Handler) http.Handler {
+func clientCertMiddleware(next http.Handler, certManager CertManager) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println(r.Header)
 		// 証明書の抽出
@@ -34,47 +80,23 @@ func clientCertMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// 証明書のデコード
-		decodedCertHeader, err := base64.StdEncoding.DecodeString(certHeader)
+		cert, err := certManager.VerifyCert(certHeader)
 		if err != nil {
-			http.Error(w, "Failed to decode certificate", http.StatusForbidden)
-			return
-		}
-		fmt.Printf("decodedCertHeader: %s\n", decodedCertHeader)
-		certBlock, _ := pem.Decode([]byte(decodedCertHeader))
-		fmt.Printf("certBlock: %s\n", certBlock)
-		if certBlock == nil {
-			http.Error(w, "Failed to decode certificate", http.StatusForbidden)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		// 証明書の解析
-		cert, err := x509.ParseCertificate(certBlock.Bytes)
+		roots, err := certManager.LoadRootCert()
 		if err != nil {
-			http.Error(w, "Failed to parse certificate", http.StatusForbidden)
-			return
+			http.Error(w, err.Error(), http.StatusInternalServerError) 
 		}
 
-		// ファイルからルート証明書を読み込む
-		rootCertPEM, err := os.ReadFile("pki/rootCA.crt")
-		if err != nil {
-			http.Error(w, "Failed to read root certificate", http.StatusForbidden)
-			return
-		}
-
-		// ルート証明書をCertPoolに追加
-		roots := x509.NewCertPool()
-		if !roots.AppendCertsFromPEM(rootCertPEM) {
-			http.Error(w, "Failed to add root certificate to CertPool", http.StatusForbidden)
-			return
-		}
-
-		// 証明書の検証
 		opts := x509.VerifyOptions{
 			Roots: roots,
 		}
+
 		if _, err := cert.Verify(opts); err != nil {
-			http.Error(w, "Failed to verify certificate", http.StatusForbidden)
+			http.Error(w, "Fail to verify certificate", http.StatusForbidden)
 			return
 		}
 
@@ -91,8 +113,8 @@ func proxyhandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proxyReq.Header = r.Header
-	for _, v := range r.Header {
-		fmt.Println(v)
+	for k, v := range r.Header {
+		fmt.Println(k, v)
 	}
 
 	client := &http.Client{}
