@@ -9,15 +9,16 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 )
 
 type CertManager interface {
-	LoadRootCert() (*x509.CertPool, error)
-	VerifyCert(certPEM string) (*x509.Certificate, error)
+	LoadRootCert() (*x509.CertPool, error) // ローカルからルート証明書を読み込む関数
+	VerifyCert(certPEM string) (*x509.Certificate, error) // リクエストヘッダに含まれるクライアント証明書のフォーマットを修正する関数
 }
 
 type FileCertManager struct {
-	rootCertPath string
+	rootCertPath string // ルート証明書のパス
 }
 
 func (f *FileCertManager) LoadRootCert() (*x509.CertPool, error) {
@@ -37,16 +38,19 @@ func (f *FileCertManager) LoadRootCert() (*x509.CertPool, error) {
 }
 
 func (f *FileCertManager) VerifyCert(certPEM string) (*x509.Certificate, error) {
+	// base64でエンコードされている文字列のクライアント証明書をデコードし、バイト列に変換
 	decodedCertHeader, err := base64.StdEncoding.DecodeString(certPEM)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode certificate")
 	}
 
+	// バイト列に変換したクライアント証明書をPEMブロックに変換
 	certBlock, _ := pem.Decode(decodedCertHeader)
 	if certBlock == nil {
 		return nil, fmt.Errorf("failed to decode certificate")
 	}
 
+	// PRMブロックを解析
 	cert, err := x509.ParseCertificate(certBlock.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse certificate")
@@ -55,18 +59,8 @@ func (f *FileCertManager) VerifyCert(certPEM string) (*x509.Certificate, error) 
 	return cert, nil
 }
 
-func main() {
-	certManager := &FileCertManager{rootCertPath: "pki/rootCA.crt"}
-
-	go func() {
-		http.HandleFunc("/upstream/", upstreamHandler)
-		log.Println("Upstream server is running on port 8081")
-		log.Fatal(http.ListenAndServe(":8081", nil))
-	}()
-
-	http.Handle("/", clientCertMiddleware(http.HandlerFunc(proxyhandler), certManager))
-	log.Println("Server is running on port 8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+func isCertExpired(cert *x509.Certificate) bool {
+	return time.Now().After(cert.NotAfter)
 }
 
 func clientCertMiddleware(next http.Handler, certManager CertManager) http.Handler {
@@ -86,6 +80,9 @@ func clientCertMiddleware(next http.Handler, certManager CertManager) http.Handl
 			return
 		}
 
+		fmt.Println(":::certificate:::")
+		fmt.Println(cert)
+
 		roots, err := certManager.LoadRootCert()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError) 
@@ -95,8 +92,15 @@ func clientCertMiddleware(next http.Handler, certManager CertManager) http.Handl
 			Roots: roots,
 		}
 
+		// クライアント証明書の検証
 		if _, err := cert.Verify(opts); err != nil {
 			http.Error(w, "Fail to verify certificate", http.StatusForbidden)
+			return
+		}
+
+		// 有効期限の確認
+		if isCertExpired(cert) {
+			http.Error(w, "Certificate has expired", http.StatusForbidden)
 			return
 		}
 
@@ -144,4 +148,18 @@ func proxyhandler(w http.ResponseWriter, r *http.Request) {
 func upstreamHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Hello from upstream server"))
+}
+
+func main() {
+	certManager := &FileCertManager{rootCertPath: "pki/rootCA.crt"}
+
+	go func() {
+		http.HandleFunc("/upstream/", upstreamHandler)
+		log.Println("Upstream server is running on port 8081")
+		log.Fatal(http.ListenAndServe(":8081", nil))
+	}()
+
+	http.Handle("/", clientCertMiddleware(http.HandlerFunc(proxyhandler), certManager))
+	log.Println("Server is running on port 8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
