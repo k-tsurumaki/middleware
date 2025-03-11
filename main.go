@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -12,16 +14,18 @@ import (
 	"time"
 )
 
-type CertManager interface {
-	LoadRootCert() (*x509.CertPool, error) // ローカルからルート証明書を読み込む関数
-	VerifyCert(certPEM string) (*x509.Certificate, error) // リクエストヘッダに含まれるクライアント証明書のフォーマットを修正する関数
+type certManager interface {
+	loadRootCert() (*x509.CertPool, error)                                     // ローカルからルート証明書を読み込む関数
+	verifyCert(certPEM string) (*x509.Certificate, error)                      // リクエストヘッダに含まれるクライアント証明書のフォーマットを修正する関数
+	isFingerprintMatched(cert *x509.Certificate, fingerprintHeader string) bool // フィンガープリントを検証する関数
+
 }
 
-type FileCertManager struct {
+type fileCertManager struct {
 	rootCertPath string // ルート証明書のパス
 }
 
-func (f *FileCertManager) LoadRootCert() (*x509.CertPool, error) {
+func (f *fileCertManager) loadRootCert() (*x509.CertPool, error) {
 	// ローカルからルート証明書を読み込み
 	rootCertPEM, err := os.ReadFile(f.rootCertPath)
 	if err != nil {
@@ -37,7 +41,7 @@ func (f *FileCertManager) LoadRootCert() (*x509.CertPool, error) {
 	return roots, nil
 }
 
-func (f *FileCertManager) VerifyCert(certPEM string) (*x509.Certificate, error) {
+func (f *fileCertManager) verifyCert(certPEM string) (*x509.Certificate, error) {
 	// base64でエンコードされている文字列のクライアント証明書をデコードし、バイト列に変換
 	decodedCertHeader, err := base64.StdEncoding.DecodeString(certPEM)
 	if err != nil {
@@ -59,13 +63,23 @@ func (f *FileCertManager) VerifyCert(certPEM string) (*x509.Certificate, error) 
 	return cert, nil
 }
 
+func (f *fileCertManager) isFingerprintMatched(cert *x509.Certificate, fingerprintHeader string) bool {
+	fingerprint := sha256.Sum256(cert.Raw)
+	fmt.Println(":::fingerprint:::")
+	fmt.Println(hex.EncodeToString(fingerprint[:]))
+	return hex.EncodeToString(fingerprint[:]) == fingerprintHeader
+}
+
 func isCertExpired(cert *x509.Certificate) bool {
+	fmt.Println(":::expiration date:::")
+	fmt.Println(cert.NotAfter)
 	return time.Now().After(cert.NotAfter)
 }
 
-func clientCertMiddleware(next http.Handler, certManager CertManager) http.Handler {
+func clientCertMiddleware(next http.Handler, certManager certManager) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println(r.Header)
+
 		// 証明書の抽出
 		certHeader := r.Header.Get("X-SSL-Client-Cert")
 		fmt.Printf("certificate: %s\n", certHeader)
@@ -74,18 +88,35 @@ func clientCertMiddleware(next http.Handler, certManager CertManager) http.Handl
 			return
 		}
 
-		cert, err := certManager.VerifyCert(certHeader)
+		// フィンガープリントの抽出
+		fingerprintHeader := r.Header.Get("X-SSL-Client-Fingerprint")
+		fmt.Printf("fingerprint: %s\n", fingerprintHeader)
+		if certHeader == "" {
+			http.Error(w, "Fingerprint is not found", http.StatusForbidden)
+			return
+		}
+
+		cert, err := certManager.verifyCert(certHeader)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
+		// // Subject DNの取得
+		// subjectDN := cert.Subject.String()
+		// fmt.Printf("Subject DN: %s\n", subjectDN)
+
+		// // SANの取得
+		// for _, san := range cert.DNSNames {
+		// 	fmt.Printf("SAN: %s\n", san)
+		// }
+
 		fmt.Println(":::certificate:::")
 		fmt.Println(cert)
 
-		roots, err := certManager.LoadRootCert()
+		roots, err := certManager.loadRootCert()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError) 
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 
 		opts := x509.VerifyOptions{
@@ -95,6 +126,12 @@ func clientCertMiddleware(next http.Handler, certManager CertManager) http.Handl
 		// クライアント証明書の検証
 		if _, err := cert.Verify(opts); err != nil {
 			http.Error(w, "Fail to verify certificate", http.StatusForbidden)
+			return
+		}
+
+		// フィンガープリントの検証
+		if !certManager.isFingerprintMatched(cert, fingerprintHeader) {
+			http.Error(w, "Fail to verify fingerprint", http.StatusForbidden)
 			return
 		}
 
@@ -151,7 +188,7 @@ func upstreamHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	certManager := &FileCertManager{rootCertPath: "pki/rootCA.crt"}
+	certManager := &fileCertManager{rootCertPath: "pki/rootCA.crt"}
 
 	go func() {
 		http.HandleFunc("/upstream/", upstreamHandler)
