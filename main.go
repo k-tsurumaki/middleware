@@ -84,7 +84,7 @@ func clientCertMiddleware(next http.Handler, certManager certManager) http.Handl
 		certHeader := r.Header.Get("X-SSL-Client-Cert")
 		fmt.Printf("certificate: %s\n", certHeader)
 		if certHeader == "" {
-			http.Error(w, "Client certificate not found", http.StatusForbidden)
+			http.Error(w, "Client certificate not found", http.StatusBadRequest)
 			return
 		}
 
@@ -92,7 +92,7 @@ func clientCertMiddleware(next http.Handler, certManager certManager) http.Handl
 		fingerprintHeader := r.Header.Get("X-SSL-Client-Fingerprint")
 		fmt.Printf("fingerprint: %s\n", fingerprintHeader)
 		if certHeader == "" {
-			http.Error(w, "Fingerprint is not found", http.StatusForbidden)
+			http.Error(w, "Fingerprint is not found", http.StatusBadRequest)
 			return
 		}
 
@@ -116,19 +116,19 @@ func clientCertMiddleware(next http.Handler, certManager certManager) http.Handl
 
 		// クライアント証明書の検証
 		if _, err := cert.Verify(opts); err != nil {
-			http.Error(w, "Fail to verify certificate", http.StatusForbidden)
+			http.Error(w, "Fail to verify certificate", http.StatusUnauthorized)
 			return
 		}
 
 		// フィンガープリントの検証
 		if !certManager.isFingerprintMatched(cert, fingerprintHeader) {
-			http.Error(w, "Fail to verify fingerprint", http.StatusForbidden)
+			http.Error(w, "Fail to verify fingerprint", http.StatusUnauthorized)
 			return
 		}
 
 		// 有効期限の確認
 		if isCertExpired(cert) {
-			http.Error(w, "Certificate has expired", http.StatusForbidden)
+			http.Error(w, "Certificate has expired", http.StatusUnauthorized)
 			return
 		}
 
