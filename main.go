@@ -16,7 +16,7 @@ import (
 
 type certManager interface {
 	loadRootCert() (*x509.CertPool, error)                                     // ローカルからルート証明書を読み込む関数
-	verifyCert(certPEM string) (*x509.Certificate, error)                      // リクエストヘッダに含まれるクライアント証明書のフォーマットを修正する関数
+	verifyCert(certHeader string) (*x509.Certificate, error)                      // リクエストヘッダに含まれるクライアント証明書のフォーマットを修正する関数
 	isFingerprintMatched(cert *x509.Certificate, fingerprintHeader string) bool // フィンガープリントを検証する関数
 
 }
@@ -41,9 +41,9 @@ func (f *fileCertManager) loadRootCert() (*x509.CertPool, error) {
 	return roots, nil
 }
 
-func (f *fileCertManager) verifyCert(certPEM string) (*x509.Certificate, error) {
+func (f *fileCertManager) verifyCert(certHeader string) (*x509.Certificate, error) {
 	// base64でエンコードされている文字列のクライアント証明書をデコードし、バイト列に変換
-	decodedCertHeader, err := base64.StdEncoding.DecodeString(certPEM)
+	decodedCertHeader, err := base64.StdEncoding.DecodeString(certHeader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode certificate")
 	}
@@ -101,15 +101,6 @@ func clientCertMiddleware(next http.Handler, certManager certManager) http.Handl
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-
-		// // Subject DNの取得
-		// subjectDN := cert.Subject.String()
-		// fmt.Printf("Subject DN: %s\n", subjectDN)
-
-		// // SANの取得
-		// for _, san := range cert.DNSNames {
-		// 	fmt.Printf("SAN: %s\n", san)
-		// }
 
 		fmt.Println(":::certificate:::")
 		fmt.Println(cert)
